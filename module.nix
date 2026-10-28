@@ -1,11 +1,16 @@
 # Alert when the machine is stuck in the initrd waiting for the LUKS
-# passphrase, by failing a healthchecks.io check from the initrd itself.
+# passphrase, by failing a heartbeat check from the initrd itself.
 #
-# healthchecks.io is a dead man's switch: it alerts on a *missing* ping, which
-# is backwards for an event we want to announce. The `/fail` endpoint inverts
-# it and alerts immediately. The booted system then pings the same check OK,
-# both to resolve the alert and, since it keeps pinging hourly, to catch a
-# machine that never reaches the prompt at all.
+# A heartbeat service is a dead man's switch: it alerts on a *missing* ping,
+# which is backwards for an event we want to announce. A failure endpoint
+# inverts it and alerts immediately. The booted system then pings the same
+# check OK, both to resolve the alert and, since it keeps pinging hourly, to
+# catch a machine that never reaches the prompt at all.
+#
+# The defaults suit any service whose ping URL means "ok" on its own and takes
+# a `/fail` path for an immediate failure, which covers healthchecks.io and
+# Better Stack. For one that puts the state in a query string instead, such as
+# Uptime Kuma or Cronitor, set `failSuffix` and `okSuffix`.
 {
   config,
   lib,
@@ -21,11 +26,11 @@ let
     url="$(${pkgs.coreutils}/bin/cat ${cfg.urlFile})"
     case "$1" in
     fail)
-      suffix="/fail"
+      suffix="${cfg.failSuffix}"
       body="${config.networking.hostName} is in the initrd, waiting for the LUKS passphrase"
       ;;
     ok)
-      suffix=""
+      suffix="${cfg.okSuffix}"
       body="${config.networking.hostName} is up"
       ;;
     esac
@@ -38,18 +43,42 @@ let
 in
 {
   options.services.luksPromptAlert = {
-    enable = lib.mkEnableOption "the healthchecks.io alert for a pending LUKS passphrase prompt";
+    enable = lib.mkEnableOption "the heartbeat alert for a pending LUKS passphrase prompt";
 
     urlFile = lib.mkOption {
       type = lib.types.str;
-      default = "/etc/secrets/healthchecks-luks-url";
+      default = "/etc/secrets/heartbeat-luks-url";
       description = ''
-        File holding the healthchecks.io ping URL, without a trailing slash.
+        File holding the heartbeat check's ping URL, without a trailing slash.
 
         It is read at runtime rather than interpolated, to keep the URL out of
         the world-readable nix store and out of git. It has to exist on the
         machine itself before {command}`nixos-rebuild switch` runs, including
         when regenerating the initrd of an older generation.
+      '';
+    };
+
+    failSuffix = lib.mkOption {
+      type = lib.types.str;
+      default = "/fail";
+      example = "?status=down";
+      description = ''
+        Appended to {option}`urlFile`'s URL to report that the passphrase is
+        still pending. The default is what healthchecks.io and Better Stack
+        expect; a service that carries the state in a query string, such as
+        Uptime Kuma, needs its own.
+      '';
+    };
+
+    okSuffix = lib.mkOption {
+      type = lib.types.str;
+      default = "";
+      example = "?status=up";
+      description = ''
+        Appended to {option}`urlFile`'s URL to report the machine as up, which
+        is also what resolves a pending alert. Services that treat the bare
+        ping URL as success, such as healthchecks.io and Better Stack, want
+        this empty.
       '';
     };
 

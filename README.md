@@ -9,13 +9,13 @@ and no second machine has to be trusted to be up.
 
 ## How it works
 
-[healthchecks.io] is a dead man's switch: it alerts on a *missing* ping, which
-is backwards for an event you want to announce. Its `/fail` endpoint inverts
-that and alerts immediately, so one check carries both signals:
+A heartbeat service is a dead man's switch: it alerts on a *missing* ping,
+which is backwards for an event you want to announce. A failure endpoint
+inverts that, so one check carries both signals:
 
-- **The initrd pings `/fail`**, `delay` (3 minutes by default) after boot. That
-  delay is what keeps ordinary reboots quiet: entering the passphrase switches
-  root and kills the pending timer before it ever fires.
+- **The initrd reports failure**, `delay` (3 minutes by default) after boot.
+  That delay is what keeps ordinary reboots quiet: entering the passphrase
+  switches root and kills the pending timer before it ever fires.
 - **The booted system pings OK**, at boot and hourly. That resolves the alert,
   and because the pings keep coming it also catches the cases the initrd can't
   report at all — a machine that never reaches the prompt, or one whose
@@ -33,41 +33,62 @@ that and alerts immediately, so one check carries both signals:
   services.luksPromptAlert = {
     enable = true;
     # Optional, these are the defaults:
-    urlFile = "/etc/secrets/healthchecks-luks-url";
+    urlFile = "/etc/secrets/heartbeat-luks-url";
     nameservers = [ "9.9.9.9" "1.1.1.1" ];
     delay = "3min";
+    failSuffix = "/fail";
+    okSuffix = "";
   };
 }
 ```
 
 Then, once:
 
-1. **Create the check** on healthchecks.io. Period **2h**, grace **15m** — the
-   hourly pings keep it green, and one missed ping won't cry wolf.
+1. **Create the check.** Set its period to **2h** and grace to **15m** — the
+   hourly pings keep it green, and one missed ping won't cry wolf. On Better
+   Stack those are "Expect a heartbeat every" and "Grace period".
 2. **Write its ping URL** to `urlFile` on the machine itself, mode `0600`, with
-   **no trailing slash** (the module appends `/fail`):
+   **no trailing slash** (the module appends `failSuffix`):
 
    ```
-   printf 'https://hc-ping.com/<uuid>' > /etc/secrets/healthchecks-luks-url
-   chmod 600 /etc/secrets/healthchecks-luks-url
+   printf 'https://hc-ping.com/<uuid>' > /etc/secrets/heartbeat-luks-url
+   chmod 600 /etc/secrets/heartbeat-luks-url
    ```
 
    This file has to exist **before** `nixos-rebuild switch`, including when it
    regenerates the initrd of an older generation, or the switch fails.
 
+### Supported services
+
+The defaults suit any service whose bare ping URL means "ok" and which takes a
+`/fail` path for an immediate failure:
+
+| Service | `urlFile` | `failSuffix` | `okSuffix` |
+| --- | --- | --- | --- |
+| [healthchecks.io] | `https://hc-ping.com/<uuid>` | *default* | *default* |
+| [Better Stack] | `https://incidents.betterstack.com/api/v1/heartbeat/<token>` | *default* | *default* |
+| [Uptime Kuma] | `https://<host>/api/push/<token>` | `?status=down` | `?status=up` |
+
+Anything else that takes an unauthenticated URL and distinguishes success from
+failure by path or query string will work the same way.
+
 ### Why the URL lives in a file
 
 The URL is read at runtime rather than interpolated into the config, so it
 stays out of the world-readable nix store and out of git. A ping URL in a
-public repository lets anyone suppress your alerts by pinging OK.
+public repository lets anyone suppress your alerts by pinging OK — and not
+only deliberately: a URL in a public repo gets fetched by crawlers and link
+checkers, and a stray success ping silently resolves a real alert.
 
-It can't be a [agenix]/[sops-nix] secret either: the initrd has no way to
-decrypt one, since the host key lives on the encrypted root. `boot.initrd.secrets`
-appends the file when the bootloader is installed instead.
+It can't be an [agenix]/[sops-nix] secret either: the initrd has no way to
+decrypt one, since the host key lives on the encrypted root.
+`boot.initrd.secrets` appends the file when the bootloader is installed
+instead.
 
 Note that the initrd is unencrypted on the ESP regardless, so anyone holding
-the disk can read whatever is in it. That is fine for a publish-only ping URL
-and is exactly why this must not be an SMTP password or an API token.
+the disk can read whatever is in it. That is fine for a ping URL, whose token
+can only report state for that one check, and is exactly why this must not be
+an SMTP password or a management API token.
 
 ### Testing it
 
@@ -110,5 +131,7 @@ zstdcat $(nix build --no-link --print-out-paths \
 ```
 
 [healthchecks.io]: https://healthchecks.io
+[Better Stack]: https://betterstack.com/docs/uptime/cron-and-heartbeat-monitor/
+[Uptime Kuma]: https://github.com/louislam/uptime-kuma
 [agenix]: https://github.com/ryantm/agenix
 [sops-nix]: https://github.com/Mic92/sops-nix
