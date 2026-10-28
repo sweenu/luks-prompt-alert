@@ -34,7 +34,6 @@ inverts that, so one check carries both signals:
     enable = true;
     # Optional, these are the defaults:
     urlFile = "/etc/secrets/heartbeat-luks-url";
-    nameservers = [ "9.9.9.9" "1.1.1.1" ];
     delay = "3min";
     failSuffix = "/fail";
     okSuffix = "";
@@ -101,26 +100,37 @@ longer than `delay`, and confirm the alert arrives.
 
 ## Requirements
 
-- A systemd initrd with networking (`boot.initrd.systemd.network.enable`) —
-  asserted.
-- A bootloader that supports initrd secrets, i.e. systemd-boot or GRUB —
-  asserted.
+All three are asserted, so a missing one is an eval error rather than an alert
+that never arrives:
+
+- A systemd initrd with networking — `boot.initrd.systemd.network.enable`.
+- A resolver in the initrd — `boot.initrd.services.resolved.enable`, which
+  NixOS turns on by default whenever the initrd has networkd. Without it, set
+  `nameservers` instead.
+- A bootloader that supports initrd secrets, i.e. systemd-boot or GRUB.
 
 ## Two initrd traps this module works around
 
-Both of these fail silently, at the one moment you need the alert:
+Both fail silently, at the one moment you need the alert:
 
-- **The systemd initrd has no systemd-resolved and no `/etc/resolv.conf`**, so
-  the `dns` settings of a `boot.initrd.systemd.network` profile don't apply
-  there and nothing resolves. The module writes a resolv.conf from
-  `nameservers`.
+- **The initrd carries no CA bundle.** NixOS gives the initrd a resolver and a
+  network, but nothing to verify TLS against. For curl that means every HTTPS
+  request fails verification; for resolved it means DNS-over-TLS fails, either
+  silently downgrading to plaintext (`DNSOverTLS = "opportunistic"`) or
+  breaking DNS entirely (`true`). The module installs
+  `security.pki.caBundle` at `/etc/ssl/certs/ca-certificates.crt` and points
+  `SSL_CERT_FILE` there.
 - **`boot.initrd.systemd.storePaths` follows ELF dependencies, not the nix
-  store references of a shell script.** A script listed there lands in the
-  image while everything it calls by absolute path does not. The first working
-  version of this module shipped an initrd containing `libcurl.so` — pulled in
-  by systemd — but no `curl` binary. The shell, coreutils, curl and the CA
-  bundle are all listed explicitly, and TLS additionally needs `SSL_CERT_FILE`
-  pointing into `pkgs.cacert`.
+  store references of a shell script.** This is by design — the initrd builder
+  deliberately does not copy full closures; its
+  [README](https://github.com/NixOS/nixpkgs/blob/master/pkgs/build-support/kernel/make-initrd-ng/README.md)
+  says "it is the burden of the developer to ensure that all necessary
+  dependencies are copied in, as closures won't be consulted". So a script
+  listed there lands in the image while everything it calls by absolute path
+  does not. The first working version of this module shipped an initrd
+  containing `libcurl.so` — pulled in by systemd, which links it — but no
+  `curl` binary, since curl's binary is in a separate output that nothing had
+  rooted. The shell, coreutils and curl are therefore listed explicitly.
 
 To check an initrd for yourself:
 

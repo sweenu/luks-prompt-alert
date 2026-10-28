@@ -11,6 +11,11 @@
 # a `/fail` path for an immediate failure, which covers healthchecks.io and
 # Better Stack. For one that puts the state in a query string instead, such as
 # Uptime Kuma or Cronitor, set `failSuffix` and `okSuffix`.
+#
+# DNS in the initrd is NixOS' job, through `boot.initrd.services.resolved`,
+# which is on by default whenever the initrd has networkd. What NixOS does not
+# put there is a CA bundle, which both curl and resolved's DNS-over-TLS need,
+# so this module adds one.
 {
   config,
   lib,
@@ -84,14 +89,19 @@ in
 
     nameservers = lib.mkOption {
       type = lib.types.listOf lib.types.str;
-      default = [
-        "9.9.9.9"
-        "1.1.1.1"
-      ];
+      default = [ ];
+      example = [ "9.9.9.9" ];
       description = ''
-        Resolvers to write to {file}`/etc/resolv.conf` in the initrd. The
-        initrd runs no systemd-resolved, so the `dns` settings of a networkd
-        profile don't apply there and nothing would resolve without this.
+        Escape hatch for initrds without systemd-resolved: the resolvers to
+        write to {file}`/etc/resolv.conf` there.
+
+        Leave this empty, which is the default, when
+        {option}`boot.initrd.services.resolved.enable` is on — it is on by
+        default whenever the initrd has networkd — since resolved already
+        provides {file}`/etc/resolv.conf` from your
+        {option}`services.resolved` settings. Writing this file would
+        pre-empt resolved's symlink, as systemd-tmpfiles won't replace an
+        existing file, and downgrade DNS-over-TLS to plaintext.
       '';
     };
 
@@ -126,6 +136,14 @@ in
           not support. systemd-boot and GRUB both do.
         '';
       }
+      {
+        assertion = config.boot.initrd.services.resolved.enable || cfg.nameservers != [ ];
+        message = ''
+          services.luksPromptAlert resolves a hostname from the initrd, which
+          has no resolver: enable `boot.initrd.services.resolved.enable`, or
+          set `services.luksPromptAlert.nameservers`.
+        '';
+      }
     ];
 
     boot.initrd = {
@@ -143,12 +161,18 @@ in
           pkgs.runtimeShellPackage
           pkgs.coreutils
           pkgs.curl
-          pkgs.cacert
         ];
 
-        contents."/etc/resolv.conf".text = lib.concatMapStrings (
-          ns: "nameserver ${ns}\n"
-        ) cfg.nameservers;
+        contents = {
+          # The initrd carries no CA bundle, so TLS has nothing to verify
+          # against. This is also what resolved needs for DNS-over-TLS: with
+          # `DNSOverTLS = "opportunistic"` it silently downgrades to plaintext
+          # without it, and with `true` DNS fails outright.
+          "/etc/ssl/certs/ca-certificates.crt".source = config.security.pki.caBundle;
+        }
+        // lib.optionalAttrs (cfg.nameservers != [ ]) {
+          "/etc/resolv.conf".text = lib.concatMapStrings (ns: "nameserver ${ns}\n") cfg.nameservers;
+        };
 
         services.luks-prompt-alert = {
           description = "Report a pending LUKS passphrase prompt";
@@ -161,7 +185,8 @@ in
           unitConfig.ConditionPathIsMountPoint = "!/sysroot";
           serviceConfig = {
             Type = "oneshot";
-            Environment = "SSL_CERT_FILE=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
+            # Explicit rather than relying on curl's compiled-in default path.
+            Environment = "SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt";
             ExecStart = "${ping} fail";
           };
         };
