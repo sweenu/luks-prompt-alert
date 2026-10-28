@@ -180,9 +180,25 @@ in
           # whose wait-online unit isn't wanted by anything in the initrd.
           after = [ "systemd-networkd.service" ];
           wants = [ "systemd-networkd.service" ];
-          # Covers the passphrase being entered just as the timer expires: by
-          # then the root is mounted and switch-root is on its way.
-          unitConfig.ConditionPathIsMountPoint = "!/sysroot";
+          before = [
+            "shutdown.target"
+            "initrd-switch-root.target"
+          ];
+          conflicts = [
+            "shutdown.target"
+            "initrd-switch-root.target"
+          ];
+          unitConfig = {
+            # Without this the unit inherits `Requires=/After=sysinit.target`,
+            # and sysinit.target is ordered *after* cryptsetup.target, so it
+            # could only ever run once the passphrase had been entered — which
+            # is precisely when there is nothing to report. Every initrd unit
+            # that has to run before the unlock does this, sshd included.
+            DefaultDependencies = false;
+            # Covers the passphrase being entered just as the timer expires: by
+            # then the root is mounted and switch-root is on its way.
+            ConditionPathIsMountPoint = "!/sysroot";
+          };
           serviceConfig = {
             Type = "oneshot";
             # Explicit rather than relying on curl's compiled-in default path.
@@ -194,6 +210,18 @@ in
         timers.luks-prompt-alert = {
           description = "Delay the pending LUKS passphrase report";
           wantedBy = [ "initrd.target" ];
+          before = [
+            "shutdown.target"
+            "initrd-switch-root.target"
+          ];
+          conflicts = [
+            "shutdown.target"
+            "initrd-switch-root.target"
+          ];
+          # Same reason as the service: the default dependencies would hold the
+          # timer behind sysinit.target, so `OnActiveSec` would start counting
+          # only after the unlock it is supposed to be waiting for.
+          unitConfig.DefaultDependencies = false;
           timerConfig = {
             OnActiveSec = cfg.delay;
             AccuracySec = "1s";
